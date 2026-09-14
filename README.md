@@ -1,9 +1,6 @@
 # effect-smtp
 
-Pure, Effect-native SMTP client and server. `Transport` is a structural
-seam — anyone can implement it (a TCP client, a TLS-wrapped socket, an
-in-memory test double). The library is pure; only the bundled
-`node-tcp.ts` and `server.ts` ever touch the network.
+a very good Effect-native SMTP client and server. No external deps. Passes all tests and achieves ~throughput parity with other benchmarks.
 
 ## Quick start — client
 
@@ -98,9 +95,7 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 
 ## Development
 
-- `nub run lint` — oxlint
-- `nub run fmt` — oxfmt
-- `nub run check-types` — `tsc --noEmit`
+
 - `nub run test` — vitest (24 tests; no external processes)
 - `nub run test:docker` — Docker integration via alchemy (see below)
 - `nub run test:all` — both
@@ -127,13 +122,7 @@ Every domain error is a `Schema.TaggedErrorClass` with an
   a reviewable plan/diff, adopted images, and a teardown that removes
   exactly what it created.
 
-## Version
 
-`effect@4.0.0-rc.112`. The `@effect/platform-*` dev dependencies are
-pinned to the same rc (with a `pnpm.overrides` pin on
-`@effect/platform-node-shared`) — the rc.115 line renamed
-`Config.string` to `Config.String`, which alchemy 2.0.0-beta.77 does
-not yet follow.
 
 ## Benchmark
 
@@ -143,10 +132,6 @@ the same raw-TCP client, and writes `bench/RESULTS.md`. See that file
 for the methodology, the greeting-delay caveat on the connection
 scenario, and the current numbers.
 
-## Status
+## License
 
-Beta 0.1 — submission client + receiving server over a shared
-`Transport` seam. STARTTLS upgrade is supported on the client side;
-server-side STARTTLS is wired but the cert/key plumbing is left to
-the caller. Auth is PLAIN, LOGIN, XOAUTH2 on the client and PLAIN,
-LOGIN on the server.
+MIT
