@@ -1,0 +1,50 @@
+{
+  "name": "effect-smtp",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "sideEffects": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client/index.ts",
+    "./server": "./src/server/index.ts",
+    "./errors": "./src/shared/errors.ts",
+    "./envelope": "./src/shared/envelope.ts",
+    "./transport": "./src/shared/transport/index.ts",
+    "./transport/node-tcp": "./src/shared/transport/node-tcp.ts"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.112",
+    "vitest": "^2.0.0",
+    "typescript": "^5.5.0",
+    "oxlint": "^1.0.0",
+    "oxfmt": "^0.59.0",
+    "@types/node": "latest"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "lint": "oxlint .",
+    "fmt": "oxfmt .",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke": "nub scripts/smoke-client.ts",
+    "smoke:server": "nub scripts/smoke-server.ts"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.8.3",
+      "onFail": "ignore"
+    }
+  }
+}

@@ -1,0 +1,47 @@
+# dependencies
+node_modules/
+.pnp/
+.pnp.js
+.yarn/
+
+# build artifacts
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# test artifacts
+coverage/
+.vitest-cache/
+.vite/
+
+# environment
+.env
+.env.local
+.env.*.local
+*.local
+
+# reference repositories (cloned for design review; not source)
+references/
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+bun-debug.log*
+.bun/
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# os
+Thumbs.db
+
+# jiujitsu workspace state
+workspaces/
+.jjw/
+.jj/

@@ -1,0 +1,16 @@
+pre-commit:
+  parallel: true
+  commands:
+    oxfmt:
+      glob: "*.{ts,tsx,js,mjs,cjs,json,md}"
+      run: nub run fmt -- {staged_files}
+    oxlint:
+      glob: "*.{ts,tsx,js,mjs,cjs}"
+      run: nub run lint -- {staged_files}
+pre-push:
+  parallel: false
+  commands:
+    test:
+      run: nub run test
+    typecheck:
+      run: nub run check-types
