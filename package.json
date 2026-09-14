@@ -20,12 +20,16 @@
     "./transport": "./src/shared/transport/index.ts",
     "./transport/node-tcp": "./src/shared/transport/node-tcp.ts"
   },
-  "peerDependencies": {
-    "effect": "4.0.0-rc.112"
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.8.3",
+      "onFail": "ignore"
+    }
   },
   "devDependencies": {
-    "@effect/platform": "^0.97.2",
-    "@effect/platform-node": "^0.108.2",
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-node-shared": "4.0.0-rc.112",
     "@types/node": "latest",
     "alchemy": "^2.0.0-beta.77",
     "effect": "4.0.0-rc.112",
@@ -34,22 +38,21 @@
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   },
+  "pnpm": {
+    "overrides": {
+      "@effect/platform-node-shared": "4.0.0-rc.112"
+    }
+  },
   "scripts": {
     "build": "tsc -b",
     "lint": "oxlint .",
     "fmt": "oxfmt .",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
-    "test:docker": "vitest run test/integration/docker.test.ts",
+    "test:docker": "nub scripts/test-docker.ts",
+    "test:all": "nub run test && nub run test:docker",
     "bench": "nub bench/run.ts",
     "smoke": "nub scripts/smoke-client.ts",
     "smoke:server": "nub scripts/smoke-server.ts"
-  },
-  "devEngines": {
-    "packageManager": {
-      "name": "nub",
-      "version": "^0.8.3",
-      "onFail": "ignore"
-    }
   }
 }

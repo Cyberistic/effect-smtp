@@ -21,6 +21,9 @@ coverage/
 .env.*.local
 *.local
 
+# alchemy local stack state
+.alchemy/
+
 # reference repositories (cloned for design review; not source)
 references/
 

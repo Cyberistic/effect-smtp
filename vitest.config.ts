@@ -5,7 +5,7 @@ export default defineConfig({
     environment: "node",
     include: ["test/**/*.test.ts"],
     testTimeout: 10_000,
-    hookTimeout: 240_000,
+    hookTimeout: 30_000,
   },
   resolve: {
     extensions: [".ts", ".js", ".mts", ".mjs"],

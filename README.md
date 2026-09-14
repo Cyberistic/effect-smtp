@@ -101,15 +101,16 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 - `nub run lint` — oxlint
 - `nub run fmt` — oxfmt
 - `nub run check-types` — `tsc --noEmit`
-- `nub run test` — vitest (26 tests, includes the Docker suites)
-- `nub run test:docker` — just the mailpit + smtp4dev suites
+- `nub run test` — vitest (24 tests; no external processes)
+- `nub run test:docker` — Docker integration via alchemy (see below)
+- `nub run test:all` — both
 - `nub run smoke` — live submission to a real server (set
   `SMTP_HOST`, `SMTP_PORT`, `FROM`, `TO`)
 - `nub run smoke:server` — bring up the in-process server and drive
   it with `swaks`
 - `nub run bench` — effect-smtp vs bun-smtp, writes `bench/RESULTS.md`
 
-### Real-server test suites
+### Test surfaces
 
 - **in-memory**: the fast suite. `test/client/*` drives the client
   against `makeInMemoryTransport` (scripted replies, no network) and
@@ -118,11 +119,21 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 - **swaks** (`brew install swaks`): `test/integration/swaks.test.ts`
   brings up the server, runs `swaks` against it, and asserts on the
   captured DATA callback.
-- **mailpit** + **smtp4dev** (Docker): `test/integration/docker.test.ts`
-  pulls `axllent/mailpit` and `rnwood/smtp4dev`, starts each on a
-  random host port, waits for its 220 greeting, and submits through
-  the real client. Both skip (with a warning) when Docker is absent,
-  so the suite still runs in a Docker-less CI.
+- **mailpit** + **smtp4dev** (Docker): `nub run test:docker` deploys
+  `alchemy.test.ts` — both mail servers declared as alchemy
+  `Docker.Container` resources on one network — reads their bound host
+  ports from the stack outputs, drives the real client against each,
+  then destroys the stack. Alchemy gives the fixtures a lifecycle:
+  a reviewable plan/diff, adopted images, and a teardown that removes
+  exactly what it created.
+
+## Version
+
+`effect@4.0.0-rc.112`. The `@effect/platform-*` dev dependencies are
+pinned to the same rc (with a `pnpm.overrides` pin on
+`@effect/platform-node-shared`) — the rc.115 line renamed
+`Config.string` to `Config.String`, which alchemy 2.0.0-beta.77 does
+not yet follow.
 
 ## Benchmark
 
