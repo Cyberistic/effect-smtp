@@ -54,7 +54,12 @@ export interface SmtpServerOptions {
     "PLAIN" | "LOGIN" | "CRAM-MD5" | "XOAUTH2"
   >;
   readonly maxSize?: number;
+  /** Default true. When false, MAIL/RCPT/DATA require AUTH first (530). */
+  readonly authOptional?: boolean;
   readonly tls?: { readonly key: string; readonly cert: string };
+  /** Do not advertise STARTTLS even when a certificate is configured. */
+  readonly hideSTARTTLS?: boolean;
+  readonly onConnect?: ServerSessionOptions["onConnect"];
   readonly onAuth?: ServerSessionOptions["onAuth"];
   readonly onMailFrom?: ServerSessionOptions["onMailFrom"];
   readonly onRcptTo?: ServerSessionOptions["onRcptTo"];
@@ -78,8 +83,10 @@ const makeSessionOptions = (
     banner: options.banner ?? "",
     lmtp: options.lmtp ?? false,
     authMethods: options.authMethods ?? [],
+    authOptional: options.authOptional ?? true,
     maxSize: options.maxSize ?? 25_000_000,
     socketTimeoutMs: options.socketTimeoutMs ?? 60_000,
+    onConnect: options.onConnect,
     onAuth: options.onAuth,
     onMailFrom: options.onMailFrom,
     onRcptTo: options.onRcptTo,
@@ -112,16 +119,27 @@ export const listenSmtp = (
       });
     });
 
-    const tlsKey = options.tls?.key;
-    const tlsCert = options.tls?.cert;
+    const tlsOptions = options.tls;
+    const tlsAvailable = tlsOptions !== undefined && !options.hideSTARTTLS;
+    const secureContext =
+      tlsOptions !== undefined
+        ? tls.createSecureContext({
+            key: tlsOptions.key,
+            cert: tlsOptions.cert,
+          })
+        : null;
     let connectionCounter = 0;
 
+    /**
+     * Server-side TLS upgrade: wrap the existing socket with a
+     * `TLSSocket` in server mode (STARTTLS upgrades a live connection —
+     * this is not an outbound `tls.connect`).
+     */
     const upgradeTlsForSocket = (
-      conn: SmtpConnection,
       socket: net.Socket,
     ): Effect.Effect<SmtpConnection, SmtpError> =>
       Effect.callback<SmtpConnection, SmtpError>((resume) => {
-        if (!tlsKey || !tlsCert) {
+        if (!secureContext) {
           resume(
             Effect.fail(
               new SmtpError({ kind: "tls", message: "no TLS configured" }),
@@ -129,11 +147,9 @@ export const listenSmtp = (
           );
           return;
         }
-        const tlsSocket = tls.connect({
-          socket,
-          key: tlsKey,
-          cert: tlsCert,
-          rejectUnauthorized: false,
+        const tlsSocket = new tls.TLSSocket(socket, {
+          isServer: true,
+          secureContext,
         });
         tlsSocket.once("error", () => {
           resume(
@@ -142,7 +158,7 @@ export const listenSmtp = (
             ),
           );
         });
-        tlsSocket.once("secureConnect", () => {
+        tlsSocket.once("secure", () => {
           resume(
             Effect.succeed(
               buildConnectionFromSocket(
@@ -169,7 +185,7 @@ export const listenSmtp = (
           current as unknown as { [SOCKET_KEY]?: net.Socket | tls.TLSSocket }
         )[SOCKET_KEY];
         const baseSocket = s instanceof net.Socket ? s : socket;
-        return upgradeTlsForSocket(current, baseSocket);
+        return upgradeTlsForSocket(baseSocket);
       };
 
       const handleOpts: HandleConnectionOptions = {
@@ -181,7 +197,7 @@ export const listenSmtp = (
         localAddress: socket.localAddress ?? "",
         localPort: socket.localPort ?? 0,
         upgradeTls,
-        tlsAvailable: tlsKey !== undefined && tlsCert !== undefined,
+        tlsAvailable,
       };
 
       const program = handleConnection(handleOpts);

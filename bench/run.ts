@@ -26,17 +26,33 @@ interface Target {
   readonly args: ReadonlyArray<string>;
 }
 
-const EFFECT_TARGET: Target = {
-  name: "effect-smtp (nub / Node)",
-  command: "nub",
-  args: [resolve(HERE, "servers/effect-server.ts")],
-};
-
-const BUN_TARGET: Target = {
-  name: "bun-smtp (Bun)",
-  command: "bun",
-  args: [resolve(HERE, "servers/bun-server.ts")],
-};
+/**
+ * Three targets, so a gap can be attributed: effect-smtp on Node vs on
+ * Bun isolates the runtime (same code), and effect-smtp-on-Bun vs
+ * bun-smtp-on-Bun isolates the implementation (same runtime).
+ */
+const TARGETS: ReadonlyArray<Target> = [
+  {
+    name: "effect-smtp (Node)",
+    command: "nub",
+    args: [resolve(HERE, "servers/effect-server.ts")],
+  },
+  {
+    name: "effect-smtp (Bun)",
+    command: "bun",
+    args: [resolve(HERE, "servers/effect-server.ts")],
+  },
+  {
+    name: "bun-smtp (Bun)",
+    command: "bun",
+    args: [resolve(HERE, "servers/bun-server.ts")],
+  },
+  {
+    name: "smtp-server (Node)",
+    command: "nub",
+    args: [resolve(HERE, "servers/smtp-server.ts")],
+  },
+];
 
 const randomPort = (): number => 20_000 + Math.floor(Math.random() * 20_000);
 
@@ -128,11 +144,14 @@ const main = async (): Promise<void> => {
     `Bun ${bunVersion} / Node ${nodeVersion} / ${cpuModel} (${cpus().length} cores)\n`,
   );
 
-  console.log(`→ ${EFFECT_TARGET.name}`);
-  const effectResults = await runTarget(EFFECT_TARGET);
+  const results = new Map<string, Map<string, ScenarioResult>>();
+  for (const target of TARGETS) {
+    console.log(`→ ${target.name}`);
+    results.set(target.name, await runTarget(target));
+  }
 
-  console.log(`→ ${BUN_TARGET.name}`);
-  const bunResults = await runTarget(BUN_TARGET);
+  const baseline = TARGETS[TARGETS.length - 1];
+  if (!baseline) throw new Error("no targets");
 
   const lines: string[] = [];
   lines.push("# effect-smtp vs bun-smtp");
@@ -144,35 +163,43 @@ const main = async (): Promise<void> => {
   lines.push("");
   lines.push(
     `Methodology: ${WARMUP_RUNS} discarded warmup runs + ${TIMED_RUNS} timed runs per scenario, median reported. ` +
-      "Each server runs as its own OS process: effect-smtp on Node (via nub), bun-smtp on Bun (its required runtime). " +
-      "Both are driven by the same raw-TCP client (`bench/client.ts`) with a no-op DATA handler, `maxSize: 0` (effect-smtp) " +
-      "matched to bun-smtp's `authOptional: true, disableReverseLookup: true`. Higher is better.",
+      "Each server runs as its own OS process and all are driven by the same raw-TCP client (`bench/client.ts`) " +
+      "with a no-op DATA handler, `maxSize: 0` (effect-smtp) matched to bun-smtp's `authOptional: true, " +
+      "disableReverseLookup: true`. The three targets separate the two effects: effect-smtp on Node vs on Bun " +
+      "isolates the runtime (same code), effect-smtp on Bun vs bun-smtp on Bun isolates the implementation. " +
+      "Higher is better.",
   );
   lines.push("");
   lines.push(
-    "Numbers are machine-dependent and the two throughput scenarios still move run-to-run " +
+    "Numbers are machine-dependent and the throughput scenarios move run-to-run " +
       "(a shared CI box or a busy laptop swings them by an order of magnitude). Treat a single " +
       "run as directional; compare medians across runs on a quiet machine before reading a gap " +
       "as real.",
   );
   lines.push("");
   lines.push(
-    `| Scenario | ${EFFECT_TARGET.name} | ${BUN_TARGET.name} | effect-smtp vs bun-smtp |`,
+    `| Scenario | ${TARGETS.map((t) => t.name).join(" | ")} | vs ${baseline.name} |`,
   );
-  lines.push("| --- | --- | --- | --- |");
+  lines.push(`| --- |${TARGETS.map(() => " --- |").join("")} --- |`);
 
-  for (const [scenarioName, effectResult] of effectResults) {
-    const bunResult = bunResults.get(scenarioName);
-    if (!bunResult) continue;
-    const pct =
-      bunResult.metricValue === 0
-        ? 0
-        : ((effectResult.metricValue - bunResult.metricValue) /
-            bunResult.metricValue) *
-          100;
-    lines.push(
-      `| ${scenarioName} | ${formatMetric(effectResult)} | ${formatMetric(bunResult)} | ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}% |`,
-    );
+  const firstResults = results.get(TARGETS[0]?.name ?? "");
+  if (firstResults) {
+    for (const [scenarioName, first] of firstResults) {
+      const cells = TARGETS.map((t) => {
+        const r = results.get(t.name)?.get(scenarioName);
+        return r ? formatMetric(r) : "—";
+      });
+      const baselineResult = results.get(baseline.name)?.get(scenarioName);
+      const pct =
+        !baselineResult || baselineResult.metricValue === 0
+          ? 0
+          : ((first.metricValue - baselineResult.metricValue) /
+              baselineResult.metricValue) *
+            100;
+      lines.push(
+        `| ${scenarioName} | ${cells.join(" | ")} | ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}% |`,
+      );
+    }
   }
 
   lines.push("");
@@ -181,7 +208,7 @@ const main = async (): Promise<void> => {
       "100ms early-talker delay before it sends the 220 greeting (`src/connection.ts`: " +
       "`setTimeout(() => connectionReady(ctx), 100)`). With a fixed 100ms floor per " +
       "connection, bun-smtp's ceiling is `1000ms / 100ms × concurrency` ≈ 500 conn/s at " +
-      "concurrency 50 — so the 477 conn/s figure measures that delay, not its accept loop. " +
+      "concurrency 50 — so its figure measures that delay, not its accept loop. " +
       "effect-smtp greets immediately. Read the two throughput rows as the real comparison; " +
       "the connection row is a protocol-policy difference.",
   );

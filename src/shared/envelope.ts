@@ -63,7 +63,15 @@ export const SendRequest = Schema.Struct({
 
 export type SendRequest = Schema.Schema.Type<typeof SendRequest>;
 
-export const SmtpAddressArgs = Schema.Record(Schema.String, Schema.String);
+/**
+ * ESMTP parameters (RFC 1869 §6): `KEY=value` pairs, plus bare flags
+ * like `SMTPUTF8` which carry no value. xtext decoding has already been
+ * applied by the parser.
+ */
+export const SmtpAddressArgs = Schema.Record(
+  Schema.String,
+  Schema.Union([Schema.String, Schema.Boolean]),
+);
 
 export const SmtpAddress = Schema.Struct({
   address: Schema.String,

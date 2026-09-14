@@ -1,7 +1,8 @@
 import { Effect, Ref } from "effect";
 import { SmtpAuthError, SmtpError, SmtpRejectError } from "../shared/errors.ts";
+import { parseAddressCommand } from "../shared/internal/address.ts";
 import { decodeBase64 } from "../shared/internal/base64.ts";
-import { DataParser } from "../shared/internal/data-parser.ts";
+import { DataParser, decodeLine } from "../shared/internal/data-parser.ts";
 import type { SmtpAddress } from "../shared/envelope.ts";
 import type { SmtpConnection } from "../shared/transport/index.ts";
 import { hostname } from "node:os";
@@ -21,8 +22,13 @@ export interface ServerSessionOptions {
   readonly authMethods: ReadonlyArray<
     "PLAIN" | "LOGIN" | "CRAM-MD5" | "XOAUTH2"
   >;
+  /** When false, MAIL/RCPT/DATA require a successful AUTH (bun-smtp parity). */
+  readonly authOptional: boolean;
   readonly maxSize: number;
   readonly socketTimeoutMs: number;
+  readonly onConnect:
+    | ((session: ServerSession) => Effect.Effect<void, SmtpRejectError>)
+    | undefined;
   readonly onAuth:
     | ((
         auth: AuthObject,
@@ -58,7 +64,14 @@ export interface AuthObject {
 }
 
 export interface DataStream {
+  /**
+   * The body's lines, decoded to UTF-8. Lazy — a handler that only
+   * drains the message should read {@link bytes} instead, so it never
+   * pays for per-line string allocation.
+   */
   readonly lines: Effect.Effect<ReadonlyArray<string>, never>;
+  /** The raw dot-unstuffed body (lines joined by CRLF), undecoded. */
+  readonly bytes: Effect.Effect<Uint8Array, never>;
   readonly byteLength: Effect.Effect<number, never>;
   readonly sizeExceeded: Effect.Effect<boolean, never>;
 }
@@ -78,30 +91,15 @@ export interface ServerSession {
   };
   readonly authenticated: boolean;
   readonly user: unknown;
+  /**
+   * SMTP-family transmission label, grown as the session does:
+   * `SMTP` → `ESMTP` after EHLO → `ESMTPS` once secured → `ESMTPSA`
+   * once authenticated. LMTP variants use the `L` prefix.
+   */
+  readonly transmissionType: string;
+  /** 1 for the first completed DATA, incrementing thereafter. */
+  readonly transaction: number;
 }
-
-const parseAddressCommand = (
-  name: string,
-  command: string,
-): SmtpAddress | null => {
-  const colonIdx = command.indexOf(":");
-  if (colonIdx === -1) return null;
-  const prefix = command.slice(0, colonIdx).trim().toUpperCase();
-  if (prefix !== name) return null;
-  const rest = command.slice(colonIdx + 1).trim();
-  const parts = rest.split(/\s+/);
-  const raw = parts.shift() ?? "";
-  const m = /^<([^>]*)>$/.exec(raw);
-  if (!m) return null;
-  const address = m[1] ?? "";
-  const args: Record<string, string> = {};
-  for (const p of parts) {
-    const eq = p.indexOf("=");
-    if (eq === -1) continue;
-    args[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1);
-  }
-  return Object.keys(args).length > 0 ? { address, args } : { address };
-};
 
 const sendReply = (
   conn: SmtpConnection,
@@ -157,6 +155,7 @@ interface SessionState {
   readonly mailFrom: SmtpAddress | undefined;
   readonly rcptTo: ReadonlyArray<SmtpAddress>;
   readonly user: unknown;
+  readonly transaction: number;
 }
 
 const initialState = (): SessionState => ({
@@ -166,7 +165,37 @@ const initialState = (): SessionState => ({
   mailFrom: undefined,
   rcptTo: [],
   user: undefined,
+  transaction: 0,
 });
+
+/** An HTTP request line hitting an SMTP port (RFC 5321 §4.2.1 note). */
+const isHttpRequest = (line: string): boolean =>
+  /^(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH|TRACE|CONNECT) \S+ HTTP\//.test(
+    line,
+  );
+
+/** True when `MAIL FROM:… SIZE=n` declares more than the configured limit. */
+const exceedsDeclaredSize = (
+  address: SmtpAddress,
+  maxSize: number,
+): boolean => {
+  if (maxSize <= 0) return false;
+  const declared = address.args?.["SIZE"];
+  if (typeof declared !== "string") return false;
+  const n = Number.parseInt(declared, 10);
+  return Number.isFinite(n) && n > maxSize;
+};
+
+/** RFC 5322-family transmission label, grown as the session progresses. */
+const transmissionType = (state: SessionState, lmtp: boolean): string => {
+  let type = lmtp ? "LMTP" : "SMTP";
+  if (state.openingCommand === "EHLO" || state.openingCommand === "LHLO") {
+    type = `E${type}`;
+  }
+  if (state.secure) type += "S";
+  if (state.user !== undefined) type += "A";
+  return type;
+};
 
 const buildSession = (
   id: string,
@@ -175,6 +204,7 @@ const buildSession = (
   localAddress: string,
   localPort: number,
   state: SessionState,
+  lmtp: boolean,
 ): ServerSession => ({
   id,
   remoteAddress,
@@ -187,6 +217,8 @@ const buildSession = (
   envelope: { mailFrom: state.mailFrom, rcptTo: state.rcptTo },
   authenticated: state.user !== undefined,
   user: state.user,
+  transmissionType: transmissionType(state, lmtp),
+  transaction: state.transaction,
 });
 
 export interface HandleConnectionOptions {
@@ -220,6 +252,41 @@ export const handleConnection = (
     } = opts;
     const stateRef = yield* Ref.make<SessionState>(initialState());
     let currentConn: SmtpConnection = conn;
+    const lmtp = sessionOptions.lmtp;
+
+    const session = (state: SessionState): ServerSession =>
+      buildSession(
+        id,
+        remoteAddress,
+        remotePort,
+        localAddress,
+        localPort,
+        state,
+        lmtp,
+      );
+
+    const readLine = (): Effect.Effect<string | null, never> =>
+      Effect.matchEffect(currentConn.readLine, {
+        onFailure: () => Effect.succeed(null),
+        onSuccess: (line) => Effect.succeed(line),
+      });
+
+    // onConnect runs before the greeting and can refuse the connection.
+    if (sessionOptions.onConnect) {
+      const state = yield* Ref.get(stateRef);
+      const refusal = yield* Effect.matchEffect(
+        sessionOptions.onConnect(session(state)),
+        {
+          onFailure: (e: SmtpRejectError) => Effect.succeed(e),
+          onSuccess: () => Effect.succeed(null),
+        },
+      );
+      if (refusal) {
+        yield* sendReply(currentConn, refusal.code, refusal.message);
+        yield* currentConn.close;
+        return;
+      }
+    }
 
     const banner =
       sessionOptions.banner !== "" ? ` ${sessionOptions.banner}` : "";
@@ -231,307 +298,247 @@ export const handleConnection = (
 
     let running = true;
     while (running) {
-      const lineResult = yield* Effect.matchEffect(currentConn.readLine, {
-        onFailure: () => Effect.succeed(null),
-        onSuccess: (line) => Effect.succeed(line),
-      });
-      if (lineResult === null) break;
-      const line = lineResult;
+      const line = yield* readLine();
+      if (line === null) break;
       const verb = line.split(" ")[0]?.toUpperCase() ?? "";
+      const arg = line.slice(verb.length).trim();
+      const state = yield* Ref.get(stateRef);
+      const greeted = state.openingCommand !== "";
+      const authed = state.user !== undefined;
 
-      if (verb === "EHLO" || verb === "LHLO") {
-        const hostnameArg = line.split(" ")[1] ?? "unknown";
-        yield* Ref.update(stateRef, (s) => ({
-          ...s,
-          openingCommand: verb,
-          clientHostname: hostnameArg,
-        }));
-        const caps = ehloCapabilities(sessionOptions, tlsAvailable);
-        yield* sendMulti(currentConn, 250, [sessionOptions.name, ...caps]);
-      } else if (verb === "HELO") {
-        const hostnameArg = line.split(" ")[1] ?? "unknown";
-        yield* Ref.update(stateRef, (s) => ({
-          ...s,
-          openingCommand: "HELO",
-          clientHostname: hostnameArg,
-        }));
-        yield* sendReply(currentConn, 250, sessionOptions.name);
-      } else if (verb === "STARTTLS" && tlsAvailable) {
-        yield* sendReply(currentConn, 220, "Begin TLS negotiation now");
-        const upgraded = yield* Effect.matchEffect(upgradeTls(currentConn), {
-          onFailure: () => Effect.succeed(null as SmtpConnection | null),
-          onSuccess: (c) => Effect.succeed(c as SmtpConnection | null),
-        });
-        if (upgraded) {
-          currentConn = upgraded;
-          yield* Ref.update(stateRef, (s) => ({ ...s, secure: true }));
+      if (verb === "EHLO" || verb === "LHLO" || verb === "HELO") {
+        if (verb === "LHLO" && !lmtp) {
+          yield* sendReply(currentConn, 500, "Command not recognized");
+        } else if (verb === "EHLO" && lmtp) {
+          yield* sendReply(currentConn, 500, "Command not recognized");
+        } else if (arg === "") {
+          yield* sendReply(currentConn, 501, `Syntax: ${verb} hostname`);
+        } else {
+          yield* Ref.update(stateRef, (s) => ({
+            ...s,
+            openingCommand: verb,
+            clientHostname: arg,
+          }));
+          if (verb === "HELO") {
+            yield* sendReply(currentConn, 250, sessionOptions.name);
+          } else {
+            // STARTTLS is not offered once the session is already secure.
+            const caps = ehloCapabilities(
+              sessionOptions,
+              tlsAvailable && !state.secure,
+            );
+            yield* sendMulti(currentConn, 250, [sessionOptions.name, ...caps]);
+          }
+        }
+      } else if (verb === "STARTTLS") {
+        if (state.secure) {
+          yield* sendReply(currentConn, 503, "TLS already active");
+        } else if (!tlsAvailable) {
+          yield* sendReply(currentConn, 502, "STARTTLS not available");
+        } else {
+          yield* sendReply(currentConn, 220, "Begin TLS negotiation now");
+          const upgraded = yield* Effect.matchEffect(upgradeTls(currentConn), {
+            onFailure: () => Effect.succeed(null as SmtpConnection | null),
+            onSuccess: (c) => Effect.succeed(c as SmtpConnection | null),
+          });
+          if (upgraded) {
+            currentConn = upgraded;
+            yield* Ref.update(stateRef, (s) => ({ ...s, secure: true }));
+          }
         }
       } else if (verb === "AUTH") {
-        const rest = line.slice(5);
-        const parts = rest.split(" ");
-        const method = parts[0];
-        if (
-          method !== "PLAIN" &&
-          method !== "LOGIN" &&
-          method !== "CRAM-MD5" &&
-          method !== "XOAUTH2"
-        ) {
+        const parts = arg.split(" ");
+        const method = parts[0] ?? "";
+        if (!greeted) {
+          yield* sendReply(currentConn, 503, "Send EHLO first");
+        } else if (!sessionOptions.authMethods.includes(method as never)) {
           yield* sendReply(
             currentConn,
             504,
             "Authentication mechanism not supported",
           );
-          continue;
-        }
-        if (!sessionOptions.authMethods.includes(method)) {
-          yield* sendReply(
-            currentConn,
-            504,
-            "Authentication mechanism not supported",
-          );
-          continue;
-        }
-        if (method === "PLAIN") {
+        } else if (method === "PLAIN") {
           const token = parts.slice(1).join(" ");
-          if (token === "") {
-            yield* sendReply(currentConn, 334, "");
-            const reply = yield* currentConn.readLine.pipe(
-              Effect.mapError(
-                (e) =>
-                  new SmtpError({
-                    kind: "auth",
-                    message: e._tag,
-                    cause: e,
-                  }),
-              ),
-            );
-            yield* runAuthPlain(
-              currentConn,
-              sessionOptions,
-              reply,
-              stateRef,
-              buildSession(
-                id,
-                remoteAddress,
-                remotePort,
-                localAddress,
-                localPort,
-                initialState(),
-              ),
-            );
-          } else {
-            yield* runAuthPlain(
-              currentConn,
-              sessionOptions,
-              token,
-              stateRef,
-              buildSession(
-                id,
-                remoteAddress,
-                remotePort,
-                localAddress,
-                localPort,
-                initialState(),
-              ),
-            );
-          }
+          const initial =
+            token === ""
+              ? yield* Effect.gen(function* () {
+                  yield* sendReply(currentConn, 334, "");
+                  return (yield* readLine()) ?? "";
+                })
+              : token;
+          yield* runAuthPlain(
+            currentConn,
+            sessionOptions,
+            initial,
+            stateRef,
+            session(state),
+          );
         } else if (method === "LOGIN") {
           yield* sendReply(currentConn, 334, "VXNlcm5hbWU6");
-          const userLine = yield* currentConn.readLine.pipe(
-            Effect.mapError(
-              (e) =>
-                new SmtpError({
-                  kind: "auth",
-                  message: e._tag,
-                  cause: e,
-                }),
-            ),
-          );
-          const username = new TextDecoder().decode(decodeBase64(userLine));
+          const userLine = (yield* readLine()) ?? "";
           yield* sendReply(currentConn, 334, "UGFzc3dvcmQ6");
-          const passLine = yield* currentConn.readLine.pipe(
-            Effect.mapError(
-              (e) =>
-                new SmtpError({
-                  kind: "auth",
-                  message: e._tag,
-                  cause: e,
-                }),
-            ),
-          );
-          const password = new TextDecoder().decode(decodeBase64(passLine));
+          const passLine = (yield* readLine()) ?? "";
+          const decode = (b64: string): string =>
+            new TextDecoder().decode(decodeBase64(b64));
           yield* runAuthCredential(
             currentConn,
             sessionOptions,
-            { method: "LOGIN", identity: username, password },
+            {
+              method: "LOGIN",
+              identity: decode(userLine),
+              password: decode(passLine),
+            },
             stateRef,
-            buildSession(
-              id,
-              remoteAddress,
-              remotePort,
-              localAddress,
-              localPort,
-              initialState(),
-            ),
+            session(state),
           );
         } else {
           yield* sendReply(
             currentConn,
             504,
-            `Method ${method} not yet implemented on server`,
+            `Method ${method} not implemented on server`,
           );
         }
       } else if (verb === "MAIL") {
-        const fromCmd = parseAddressCommand("MAIL FROM", line);
-        if (!fromCmd) {
+        const from = parseAddressCommand("MAIL FROM", line);
+        if (!greeted) {
+          yield* sendReply(currentConn, 503, "Send EHLO first");
+        } else if (!sessionOptions.authOptional && !authed) {
+          yield* sendReply(currentConn, 530, "5.7.0 Authentication required");
+        } else if (state.mailFrom !== undefined) {
+          yield* sendReply(currentConn, 503, "Nested MAIL command");
+        } else if (!from) {
           yield* sendReply(currentConn, 501, "Syntax: MAIL FROM:<address>");
-          continue;
-        }
-        const s = yield* Ref.get(stateRef);
-        if (sessionOptions.onMailFrom) {
-          const result = yield* Effect.matchEffect(
-            sessionOptions.onMailFrom(
-              fromCmd,
-              buildSession(
-                id,
-                remoteAddress,
-                remotePort,
-                localAddress,
-                localPort,
-                s,
-              ),
-            ),
-            {
-              onFailure: (e) =>
-                Effect.succeed({ ok: false as const, error: e }),
-              onSuccess: () => Effect.succeed({ ok: true as const }),
-            },
-          );
-          if (!result.ok) {
-            yield* sendReply(
-              currentConn,
-              result.error.code,
-              result.error.message,
-            );
-            continue;
-          }
-        }
-        yield* Ref.update(stateRef, (st) => ({
-          ...st,
-          mailFrom: fromCmd,
-          rcptTo: [],
-        }));
-        yield* sendReply(currentConn, 250, "2.1.0 Sender OK");
-      } else if (verb === "RCPT") {
-        const toCmd = parseAddressCommand("RCPT TO", line);
-        if (!toCmd) {
-          yield* sendReply(currentConn, 501, "Syntax: RCPT TO:<address>");
-          continue;
-        }
-        const s = yield* Ref.get(stateRef);
-        if (!s.mailFrom) {
-          yield* sendReply(currentConn, 503, "Need MAIL before RCPT");
-          continue;
-        }
-        if (sessionOptions.onRcptTo) {
-          const result = yield* Effect.matchEffect(
-            sessionOptions.onRcptTo(
-              toCmd,
-              buildSession(
-                id,
-                remoteAddress,
-                remotePort,
-                localAddress,
-                localPort,
-                s,
-              ),
-            ),
-            {
-              onFailure: (e) =>
-                Effect.succeed({ ok: false as const, error: e }),
-              onSuccess: () => Effect.succeed({ ok: true as const }),
-            },
-          );
-          if (!result.ok) {
-            yield* sendReply(
-              currentConn,
-              result.error.code,
-              result.error.message,
-            );
-            continue;
-          }
-        }
-        yield* Ref.update(stateRef, (st) => ({
-          ...st,
-          rcptTo: [...st.rcptTo, toCmd],
-        }));
-        yield* sendReply(currentConn, 250, "2.1.5 Recipient OK");
-      } else if (verb === "DATA") {
-        const s = yield* Ref.get(stateRef);
-        if (!s.mailFrom || s.rcptTo.length === 0) {
-          yield* sendReply(currentConn, 503, "Need MAIL and RCPT before DATA");
-          continue;
-        }
-        yield* sendReply(currentConn, 354, "End data with <CR><LF>.<CR><LF>");
-        const parsed = yield* readDataMode(currentConn, sessionOptions.maxSize);
-        const byteLength = parsed.byteLength;
-        const sizeExceeded =
-          sessionOptions.maxSize > 0 && byteLength > sessionOptions.maxSize;
-        if (sizeExceeded) {
+        } else if (exceedsDeclaredSize(from, sessionOptions.maxSize)) {
           yield* sendReply(
             currentConn,
             552,
-            `Message exceeds size limit of ${sessionOptions.maxSize}`,
+            "Message size exceeds fixed limit",
           );
-          continue;
+        } else {
+          const refusal = sessionOptions.onMailFrom
+            ? yield* Effect.matchEffect(
+                sessionOptions.onMailFrom(from, session(state)),
+                {
+                  onFailure: (e: SmtpRejectError) => Effect.succeed(e),
+                  onSuccess: () => Effect.succeed(null),
+                },
+              )
+            : null;
+          if (refusal) {
+            yield* sendReply(currentConn, refusal.code, refusal.message);
+          } else {
+            // A MAIL FROM opens a transaction, so the counter advances
+            // before onData sees it (1 for the first message).
+            yield* Ref.update(stateRef, (s) => ({
+              ...s,
+              mailFrom: from,
+              rcptTo: [],
+              transaction: s.transaction + 1,
+            }));
+            yield* sendReply(currentConn, 250, "2.1.0 Sender OK");
+          }
         }
-        const dataStream: DataStream = {
-          lines: Effect.succeed(parsed.lines),
-          byteLength: Effect.succeed(byteLength),
-          sizeExceeded: Effect.succeed(false),
-        };
-        const result = yield* Effect.matchEffect(
-          sessionOptions.onData(
-            dataStream,
-            buildSession(
-              id,
-              remoteAddress,
-              remotePort,
-              localAddress,
-              localPort,
-              s,
-            ),
-          ),
-          {
-            onFailure: (e) => Effect.succeed({ ok: false as const, error: e }),
-            onSuccess: () => Effect.succeed({ ok: true as const }),
-          },
-        );
-        if (!result.ok) {
-          yield* sendReply(
+      } else if (verb === "RCPT") {
+        const to = parseAddressCommand("RCPT TO", line);
+        if (!greeted) {
+          yield* sendReply(currentConn, 503, "Send EHLO first");
+        } else if (!sessionOptions.authOptional && !authed) {
+          yield* sendReply(currentConn, 530, "5.7.0 Authentication required");
+        } else if (!state.mailFrom) {
+          yield* sendReply(currentConn, 503, "Need MAIL before RCPT");
+        } else if (!to) {
+          yield* sendReply(currentConn, 501, "Syntax: RCPT TO:<address>");
+        } else if (sessionOptions.onRcptTo) {
+          const refusal = yield* Effect.matchEffect(
+            sessionOptions.onRcptTo(to, session(state)),
+            {
+              onFailure: (e: SmtpRejectError) => Effect.succeed(e),
+              onSuccess: () => Effect.succeed(null),
+            },
+          );
+          if (refusal) {
+            yield* sendReply(currentConn, refusal.code, refusal.message);
+          } else {
+            yield* Ref.update(stateRef, (s) => ({
+              ...s,
+              rcptTo: [...s.rcptTo, to],
+            }));
+            yield* sendReply(currentConn, 250, "2.1.5 Recipient OK");
+          }
+        } else {
+          yield* Ref.update(stateRef, (s) => ({
+            ...s,
+            rcptTo: [...s.rcptTo, to],
+          }));
+          yield* sendReply(currentConn, 250, "2.1.5 Recipient OK");
+        }
+      } else if (verb === "DATA") {
+        if (!greeted) {
+          yield* sendReply(currentConn, 503, "Send EHLO first");
+        } else if (!sessionOptions.authOptional && !authed) {
+          yield* sendReply(currentConn, 530, "5.7.0 Authentication required");
+        } else if (!state.mailFrom || state.rcptTo.length === 0) {
+          yield* sendReply(currentConn, 503, "Need MAIL and RCPT before DATA");
+        } else {
+          yield* sendReply(currentConn, 354, "End data with <CR><LF>.<CR><LF>");
+          const parsed = yield* readDataMode(
             currentConn,
-            result.error.code,
-            result.error.message,
+            sessionOptions.maxSize,
           );
-          continue;
+          const byteLength = parsed.byteLength;
+          if (
+            sessionOptions.maxSize > 0 &&
+            byteLength > sessionOptions.maxSize
+          ) {
+            yield* sendReply(
+              currentConn,
+              552,
+              `Message exceeds size limit of ${sessionOptions.maxSize}`,
+            );
+          } else {
+            const dataStream: DataStream = {
+              lines: Effect.sync(() => parsed.lines.map(decodeLine)),
+              bytes: Effect.sync(() => joinLines(parsed.lines)),
+              byteLength: Effect.succeed(byteLength),
+              sizeExceeded: Effect.succeed(false),
+            };
+            const refusal = yield* Effect.matchEffect(
+              sessionOptions.onData(dataStream, session(state)),
+              {
+                onFailure: (e: SmtpRejectError) => Effect.succeed(e),
+                onSuccess: () => Effect.succeed(null),
+              },
+            );
+            if (refusal) {
+              yield* sendReply(currentConn, refusal.code, refusal.message);
+            } else {
+              yield* sendReply(currentConn, 250, "2.6.0 Message accepted");
+              yield* Ref.update(stateRef, (s) => ({
+                ...s,
+                mailFrom: undefined,
+                rcptTo: [],
+              }));
+            }
+          }
         }
-        yield* sendReply(currentConn, 250, "2.6.0 Message accepted");
-        yield* Ref.update(stateRef, (st) => ({
-          ...st,
-          mailFrom: undefined,
-          rcptTo: [],
-        }));
       } else if (verb === "RSET") {
-        yield* Ref.update(stateRef, (st) => ({
-          ...st,
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
           mailFrom: undefined,
           rcptTo: [],
         }));
         yield* sendReply(currentConn, 250, "OK");
       } else if (verb === "NOOP") {
         yield* sendReply(currentConn, 250, "OK");
+      } else if (verb === "VRFY") {
+        yield* sendReply(currentConn, 252, "Cannot VRFY user, but will accept");
+      } else if (verb === "HELP") {
+        yield* sendReply(currentConn, 214, "See RFC 5321");
       } else if (verb === "QUIT") {
         yield* sendReply(currentConn, 221, "Bye");
+        running = false;
+      } else if (isHttpRequest(line)) {
+        yield* sendReply(currentConn, 421, "This is an SMTP server");
         running = false;
       } else {
         yield* sendReply(currentConn, 500, "Command not recognized");
@@ -539,10 +546,7 @@ export const handleConnection = (
     }
 
     if (sessionOptions.onClose) {
-      const s = yield* Ref.get(stateRef);
-      yield* sessionOptions.onClose(
-        buildSession(id, remoteAddress, remotePort, localAddress, localPort, s),
-      );
+      yield* sessionOptions.onClose(session(yield* Ref.get(stateRef)));
     }
 
     yield* currentConn.close;
@@ -601,12 +605,12 @@ const readDataMode = (
   conn: SmtpConnection,
   maxBytes: number,
 ): Effect.Effect<
-  { readonly lines: ReadonlyArray<string>; readonly byteLength: number },
+  { readonly lines: ReadonlyArray<Uint8Array>; readonly byteLength: number },
   SmtpError
 > =>
   Effect.gen(function* () {
     const parser = new DataParser(maxBytes);
-    const collected: string[] = [];
+    const collected: Uint8Array[] = [];
     while (!parser.finished) {
       const chunk = yield* conn.readChunk.pipe(
         Effect.mapError(
@@ -618,13 +622,32 @@ const readDataMode = (
             }),
         ),
       );
-      const { lines } = parser.feed(Buffer.from(chunk));
-      for (const parsed of lines) {
-        collected.push(parsed);
+      const { lines } = parser.feed(chunk);
+      for (const line of lines) {
+        collected.push(line);
       }
     }
     return { lines: collected, byteLength: parser.bytes };
   });
+
+/** Join unstuffed line slices with CRLF — the decoded body's byte form. */
+const joinLines = (lines: ReadonlyArray<Uint8Array>): Uint8Array => {
+  let size = 0;
+  for (const line of lines) size += line.length + 2;
+  const out = new Uint8Array(Math.max(0, size - 2));
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    if (i > 0) {
+      out[offset++] = 0x0d;
+      out[offset++] = 0x0a;
+    }
+    out.set(line, offset);
+    offset += line.length;
+  }
+  return out;
+};
 
 // Reserved for future server-side LMTP / CRAM-MD5.
 void localhost;
