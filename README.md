@@ -124,13 +124,44 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 
 
 
-## Benchmark
+## Benchmarks
 
-`nub run bench` runs three scenarios against effect-smtp and the
-[bun-smtp](https://github.com/puiusabin/bun-smtp) reference, through
-the same raw-TCP client, and writes `bench/RESULTS.md`. See that file
-for the methodology, the greeting-delay caveat on the connection
-scenario, and the current numbers.
+`nub run bench` drives every server through the **same** raw-TCP client
+(`bench/client.ts`) and the **same** scenarios, in separate OS
+processes, and writes `bench/RESULTS.md`.
+
+- `effect-smtp` runs on **both** runtimes (it uses `node:net`, which Bun
+  implements), so a gap can be attributed: effect-smtp-on-Node vs
+  effect-smtp-on-Bun isolates the runtime; effect-smtp-on-Bun vs
+  bun-smtp-on-Bun isolates the implementation.
+- [`bun-smtp`](https://github.com/puiusabin/bun-smtp) — the reference
+  implementation. Runs on Bun (it uses `Bun.listen`).
+- [`smtp-server`](https://github.com/nodemailer/smtp-server) — the
+  widely-used Node implementation, the honest Node-to-Node baseline.
+
+| Scenario | effect-smtp (Node) | effect-smtp (Bun) | bun-smtp (Bun) | smtp-server (Node) |
+| --- | --- | --- | --- | --- |
+| Concurrent transactions (50 connections) | 14,325 msg/s | 15,742 msg/s | 20,083 msg/s | 19,592 msg/s |
+| Large payloads (10 connections, 1MB bodies) | 360 MB/s | 777 MB/s | 1,651 MB/s | 566 MB/s |
+| Connection throughput¹ | 14,307 conn/s | 11,166 conn/s | 470 conn/s | 467 conn/s |
+
+Apple M2 Pro (12 cores), Node 26.8.1, Bun 1.3.13. Median of 5 timed runs
+after 2 warmups. Numbers move run-to-run — a busy laptop swings the two
+throughput rows by an order of magnitude — so read them as directional.
+
+¹ Both bun-smtp and smtp-server hardcode a 100ms early-talker delay
+before the 220 greeting (see `smtp-server`'s `readyTimer`). That fixed
+per-connection floor caps them near 500 conn/s at concurrency 50, so
+this row measures that policy, not accept-loop throughput. effect-smtp
+greets immediately. The two throughput rows are the real comparison.
+
+**Reading the numbers.** On the Node baseline we are within ~27% of
+`smtp-server` on transactions and ~37% on large payloads; on Bun our
+own code reaches 777 MB/s, so roughly half the gap to bun-smtp is the
+runtime's socket layer, not this library. The remaining large-payload
+gap is the `DataStream.lines` contract — bun-smtp's no-op handler only
+drains bytes, while ours will split and decode lines if asked. Read
+`DataStream.bytes` to stay on the byte path.
 
 ## License
 
