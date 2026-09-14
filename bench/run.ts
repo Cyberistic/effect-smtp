@@ -16,8 +16,8 @@ import { median, SCENARIOS, type ScenarioResult } from "./scenarios.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 
-const WARMUP_RUNS = 1;
-const TIMED_RUNS = 3;
+const WARMUP_RUNS = 2;
+const TIMED_RUNS = 5;
 const READY_TIMEOUT_MS = 15_000;
 
 interface Target {
@@ -143,10 +143,17 @@ const main = async (): Promise<void> => {
   );
   lines.push("");
   lines.push(
-    `Methodology: ${WARMUP_RUNS} discarded warmup run + ${TIMED_RUNS} timed runs per scenario, median reported. ` +
+    `Methodology: ${WARMUP_RUNS} discarded warmup runs + ${TIMED_RUNS} timed runs per scenario, median reported. ` +
       "Each server runs as its own OS process: effect-smtp on Node (via nub), bun-smtp on Bun (its required runtime). " +
       "Both are driven by the same raw-TCP client (`bench/client.ts`) with a no-op DATA handler, `maxSize: 0` (effect-smtp) " +
       "matched to bun-smtp's `authOptional: true, disableReverseLookup: true`. Higher is better.",
+  );
+  lines.push("");
+  lines.push(
+    "Numbers are machine-dependent and the two throughput scenarios still move run-to-run " +
+      "(a shared CI box or a busy laptop swings them by an order of magnitude). Treat a single " +
+      "run as directional; compare medians across runs on a quiet machine before reading a gap " +
+      "as real.",
   );
   lines.push("");
   lines.push(

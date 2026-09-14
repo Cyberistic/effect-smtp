@@ -99,7 +99,7 @@ export const connectionThroughput = async (
 export const concurrentTransactionThroughput = async (
   port: number,
   concurrency = 50,
-  durationMs = 5_000,
+  durationMs = 8_000,
 ): Promise<ScenarioResult> => {
   const body = makeBody(200);
   const clients = await Promise.all(
@@ -158,7 +158,7 @@ export const concurrentTransactionThroughput = async (
 export const largePayloadThroughput = async (
   port: number,
   concurrency = 10,
-  durationMs = 5_000,
+  durationMs = 8_000,
   payloadBytes = 1_024 * 1_024,
 ): Promise<ScenarioResult> => {
   const body = makeBody(payloadBytes);
