@@ -7,6 +7,15 @@ import type {
 
 export interface SmtpConnection {
   readonly readLine: Effect.Effect<string, SmtpConnectionClosed>;
+  /**
+   * Read the next raw byte chunk. Command mode uses {@link readLine};
+   * DATA mode uses this so a 1 MB body is a handful of chunk reads
+   * instead of ~13k line reads (one Effect per 76-byte line). The two
+   * share the same underlying buffer: bytes read here are the bytes
+   * `readLine` would otherwise have split, so switching between them
+   * during a session (command → DATA → command) is safe.
+   */
+  readonly readChunk: Effect.Effect<Uint8Array, SmtpConnectionClosed>;
   readonly writeLine: (
     line: string,
   ) => Effect.Effect<void, SmtpConnectionClosed>;

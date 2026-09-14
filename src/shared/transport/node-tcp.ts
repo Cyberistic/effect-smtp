@@ -5,9 +5,16 @@
 import { Buffer } from "node:buffer";
 import * as net from "node:net";
 import * as tls from "node:tls";
-import { Effect, Queue, Ref } from "effect";
-import { SmtpConnectionClosed, SmtpError, SmtpTlsError } from "../errors.ts";
+import { Effect } from "effect";
+import { SmtpError, SmtpTlsError } from "../errors.ts";
 import type { SmtpConnection, Transport } from "./index.ts";
+import {
+  buildSocketConnection,
+  closeSocketState,
+  makeSocketState,
+  pushChunk,
+  type SocketState,
+} from "./socket-connection.ts";
 
 const SOCKET_KEY = Symbol.for("effect-smtp/node-tcp/socket");
 
@@ -15,75 +22,22 @@ interface WithSocket {
   [k: symbol]: net.Socket | tls.TLSSocket | undefined;
 }
 
-const stripCRLF = (line: string): string =>
-  line.endsWith("\r\n") ? line.slice(0, -2) : line;
-
-const makeState = Effect.gen(function* () {
-  const incomingLines = yield* Queue.unbounded<string>();
-  const closed = yield* Ref.make(false);
-  return { incomingLines, closed };
-});
-
-const buildConnection = (
+const attachSocket = (
   socket: net.Socket | tls.TLSSocket,
-  state: {
-    readonly incomingLines: Queue.Queue<string>;
-    readonly closed: Ref.Ref<boolean>;
-  },
+  state: SocketState,
 ): SmtpConnection => {
-  let buffer = Buffer.alloc(0);
   socket.on("data", (chunk: Buffer | string) => {
-    const raw = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    buffer = Buffer.concat([buffer, raw]);
-    let nl = buffer.indexOf(0x0a);
-    while (nl !== -1) {
-      const end = nl > 0 && buffer[nl - 1] === 0x0d ? nl - 1 : nl;
-      const line = buffer.subarray(0, end).toString("utf8");
-      if (!Queue.offerUnsafe(state.incomingLines, line)) return;
-      buffer = buffer.subarray(nl + 1);
-      nl = buffer.indexOf(0x0a);
-    }
+    pushChunk(state, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   });
-  socket.on("close", () => {
-    Effect.runSync(Ref.set(state.closed, true));
-    Queue.offerUnsafe(state.incomingLines, "");
-  });
-  socket.on("error", () => {
-    Effect.runSync(Ref.set(state.closed, true));
-    Queue.offerUnsafe(state.incomingLines, "");
-  });
-
-  return {
-    readLine: Effect.gen(function* () {
-      const isClosed = yield* Ref.get(state.closed);
-      if (isClosed) {
-        return yield* Effect.fail(
-          new SmtpConnectionClosed({ during: "readLine" }),
-        );
-      }
-      const line = yield* Queue.take(state.incomingLines);
-      const isClosedNow = yield* Ref.get(state.closed);
-      if (isClosedNow && line === "") {
-        return yield* Effect.fail(
-          new SmtpConnectionClosed({ during: "readLine" }),
-        );
-      }
-      return stripCRLF(line);
-    }),
-    writeLine: (line) =>
-      Effect.gen(function* () {
-        const isClosed = yield* Ref.get(state.closed);
-        if (isClosed) {
-          return yield* Effect.fail(
-            new SmtpConnectionClosed({ during: `writeLine(${line})` }),
-          );
-        }
-        yield* Effect.sync(() => {
-          socket.write(`${line}\r\n`);
-        });
-      }),
-    close: Effect.sync(() => socket.end()),
-  } as SmtpConnection & WithSocket;
+  socket.on("close", () => closeSocketState(state));
+  socket.on("error", () => closeSocketState(state));
+  const conn = buildSocketConnection(
+    state,
+    (line) => socket.write(`${line}\r\n`),
+    () => socket.end(),
+  );
+  (conn as unknown as WithSocket)[SOCKET_KEY] = socket;
+  return conn;
 };
 
 const connectPlain = (
@@ -128,11 +82,9 @@ const connectPlain = (
     });
     socket.once("connect", () => {
       cleanup();
-      const state = Effect.runSync(makeState);
-      const conn = buildConnection(socket, state) as SmtpConnection &
-        WithSocket;
-      conn[SOCKET_KEY] = socket;
-      resume(Effect.succeed(conn));
+      resume(
+        Effect.succeed(attachSocket(socket, Effect.runSync(makeSocketState))),
+      );
     });
   });
 
@@ -146,10 +98,7 @@ const upgradeTlsImpl = (
       resume(Effect.fail(new SmtpTlsError({ stage: "wrap" })));
       return;
     }
-    const tlsSocket = tls.connect({
-      socket,
-      rejectUnauthorized,
-    });
+    const tlsSocket = tls.connect({ socket, rejectUnauthorized });
     let settled = false;
     const cleanup = (): void => {
       if (settled) return;
@@ -162,11 +111,11 @@ const upgradeTlsImpl = (
     });
     tlsSocket.once("secureConnect", () => {
       cleanup();
-      const state = Effect.runSync(makeState);
-      const wrapped = buildConnection(tlsSocket, state) as SmtpConnection &
-        WithSocket;
-      wrapped[SOCKET_KEY] = tlsSocket;
-      resume(Effect.succeed(wrapped));
+      resume(
+        Effect.succeed(
+          attachSocket(tlsSocket, Effect.runSync(makeSocketState)),
+        ),
+      );
     });
   });
 

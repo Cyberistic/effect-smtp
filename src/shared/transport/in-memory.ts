@@ -66,6 +66,17 @@ export const makeInMemoryTransport = (
         const line = yield* Queue.take(state.serverToClient);
         return stripCRLF(line);
       }),
+      readChunk: Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+        const isClosed = yield* Ref.get(state.closed);
+        if (isClosed) {
+          return yield* Effect.fail(
+            new SmtpConnectionClosed({ during: "readChunk" }),
+          );
+        }
+        const line = yield* Queue.take(state.serverToClient);
+        return new TextEncoder().encode(`${stripCRLF(line)}\r\n`);
+      }),
       writeLine: (line) =>
         Effect.gen(function* () {
           const state = yield* Ref.get(stateRef);
