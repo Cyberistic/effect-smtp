@@ -101,22 +101,36 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 - `nub run lint` — oxlint
 - `nub run fmt` — oxfmt
 - `nub run check-types` — `tsc --noEmit`
-- `nub run test` — vitest
-- `nub scripts/smoke-client.ts` — live submission to a real server
-  (set `SMTP_HOST`, `SMTP_PORT`, `FROM`, `TO`).
+- `nub run test` — vitest (26 tests, includes the Docker suites)
+- `nub run test:docker` — just the mailpit + smtp4dev suites
+- `nub run smoke` — live submission to a real server (set
+  `SMTP_HOST`, `SMTP_PORT`, `FROM`, `TO`)
+- `nub run smoke:server` — bring up the in-process server and drive
+  it with `swaks`
+- `nub run bench` — effect-smtp vs bun-smtp, writes `bench/RESULTS.md`
 
 ### Real-server test suites
 
-- **swaks**: `brew install swaks`. Run `nub run test` — the swaks
-  compatibility test in `test/integration/swaks.test.ts` brings up
-  the server, runs `swaks` against it, and asserts on the captured
-  DATA callback.
-- **mailpit**: `docker run -d --rm -p 8025:8025 -p 1025:1025
-  axllent/mailpit`. Set `MAILPIT_HOST=127.0.0.1 MAILPIT_PORT=1025` and
-  point the smoke script at it.
-- **smtp4dev**: `docker run -d --rm -p 5000:80 -p 2525:25
-  rnwood/smtp4dev`. The smoke script's defaults already point to
-  `smtp4.dev:2525` (the public sandbox).
+- **in-memory**: the fast suite. `test/client/*` drives the client
+  against `makeInMemoryTransport` (scripted replies, no network) and
+  `test/server/*` drives the server over a real loopback socket. No
+  external processes.
+- **swaks** (`brew install swaks`): `test/integration/swaks.test.ts`
+  brings up the server, runs `swaks` against it, and asserts on the
+  captured DATA callback.
+- **mailpit** + **smtp4dev** (Docker): `test/integration/docker.test.ts`
+  pulls `axllent/mailpit` and `rnwood/smtp4dev`, starts each on a
+  random host port, waits for its 220 greeting, and submits through
+  the real client. Both skip (with a warning) when Docker is absent,
+  so the suite still runs in a Docker-less CI.
+
+## Benchmark
+
+`nub run bench` runs three scenarios against effect-smtp and the
+[bun-smtp](https://github.com/puiusabin/bun-smtp) reference, through
+the same raw-TCP client, and writes `bench/RESULTS.md`. See that file
+for the methodology, the greeting-delay caveat on the connection
+scenario, and the current numbers.
 
 ## Status
 

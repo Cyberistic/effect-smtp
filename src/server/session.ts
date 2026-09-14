@@ -592,6 +592,18 @@ const runAuthCredential = (
     yield* sendReply(conn, 235, "2.7.0 Authentication successful");
   }).pipe(Effect.orElseSucceed(() => undefined));
 
+/**
+ * Read the DATA body.
+ *
+ * TODO(perf): the DATA phase pulls one line at a time through
+ * `SmtpConnection.readLine`, so a 1 MB message costs ~13k Effect
+ * suspensions (one per 76-byte line). The benchmark in `bench/`
+ * measures ~54 MB/s against bun-smtp's ~1.6 GB/s chunk parser. The fix
+ * is a chunk-level read primitive on the Transport seam (the seam is
+ * exactly where such a primitive belongs), letting the DataParser
+ * consume raw TCP chunks instead of reconstituted lines. Recorded, not
+ * yet done — see bench/RESULTS.md.
+ */
 const readDataMode = (
   conn: SmtpConnection,
   maxBytes: number,
@@ -614,7 +626,9 @@ const readDataMode = (
         ),
       );
       const { lines } = parser.feed(Buffer.from(`${line}\r\n`));
-      collected.push(...lines);
+      for (const parsed of lines) {
+        collected.push(parsed);
+      }
     }
     return { lines: collected, byteLength: parser.bytes };
   });
