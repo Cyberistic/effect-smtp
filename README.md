@@ -55,28 +55,30 @@ Effect.runPromise(program);
 
 ## Layout
 
-- `src/shared/` — schemas, errors, reply parser, transport seam,
-  in-memory transport, internal helpers (`base64`, `quoted-printable`,
-  `data-parser`).
+- `src/shared/` — schemas, errors, reply parser, the `Transport` seam,
+  the in-memory transport, and internal helpers (`address`,
+  `base64`, `quoted-printable`, `data-parser`).
 - `src/client/` — submission client (`SmtpClient` service).
 - `src/server/` — receiving server (`listenSmtp`).
-- `src/transport/node-tcp.ts` — the **only** file in the library that
-  imports `node:net` / `node:tls`.
+- `src/shared/transport/node-tcp.ts` (client) and `src/server/server.ts`
+  (server) — the **only** two files that import `node:net` / `node:tls`.
 
 ## Subpath exports
 
 ```json
 {
   ".": "./src/index.ts",
+  "./client": "./src/client/index.ts",
+  "./server": "./src/server/index.ts",
   "./errors": "./src/shared/errors.ts",
   "./envelope": "./src/shared/envelope.ts",
-  "./transport": "./src/shared/transport/index.ts"
+  "./transport": "./src/shared/transport/index.ts",
+  "./transport/node-tcp": "./src/shared/transport/node-tcp.ts"
 }
 ```
 
-The `./transport` subpath is the structural seam only — pure
-TypeScript interfaces. The Node TCP / TLS implementations live under
-`./transport/node-tcp` and are added in a follow-up.
+`./transport` is the structural seam (pure TypeScript interfaces) — the
+`./transport/node-tcp` entry is the Node implementation.
 
 ## Errors
 
@@ -95,15 +97,15 @@ Every domain error is a `Schema.TaggedErrorClass` with an
 
 ## Development
 
-
-- `nub run test` — vitest (24 tests; no external processes)
+- `nub run lint` / `nub run fmt` / `nub run check-types`
+- `nub run test` — vitest (106 tests; no external processes)
 - `nub run test:docker` — Docker integration via alchemy (see below)
 - `nub run test:all` — both
 - `nub run smoke` — live submission to a real server (set
   `SMTP_HOST`, `SMTP_PORT`, `FROM`, `TO`)
 - `nub run smoke:server` — bring up the in-process server and drive
   it with `swaks`
-- `nub run bench` — effect-smtp vs bun-smtp, writes `bench/RESULTS.md`
+- `nub run bench` — the benchmark below, writes `bench/RESULTS.md`
 
 ### Test surfaces
 
