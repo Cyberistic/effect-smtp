@@ -148,9 +148,7 @@ processes, and writes `bench/RESULTS.md`.
 | Connection throughput¹ | 17,548 conn/s | 9,433 conn/s | 473 conn/s | 477 conn/s |
 
 Apple M2 Pro (12 cores), Node 26.8.1, Bun 1.3.13. Best of 5 timed runs
-after 2 warmups (best-of, not median — on a shared machine other
-processes steal CPU and depress every run equally, which says nothing
-about the server). Read a gap under ~15% as noise.
+after 2 warmups (best-of, not median).
 
 ¹ Both bun-smtp and smtp-server hardcode a 100ms early-talker delay
 before the 220 greeting (see `smtp-server`'s `readyTimer`). That fixed
