@@ -143,9 +143,9 @@ processes, and writes `bench/RESULTS.md`.
 
 | Scenario | effect-smtp (Node) | effect-smtp (Bun) | bun-smtp (Bun) | smtp-server (Node) |
 | --- | --- | --- | --- | --- |
-| Concurrent transactions (50 connections) | 14,565 msg/s | 14,308 msg/s | 14,578 msg/s | 14,438 msg/s |
-| Large payloads (10 connections, 1MB bodies) | **1,425 MB/s** | **1,537 MB/s** | 1,151 MB/s | 549 MB/s |
-| Connection throughput¹ | 17,548 conn/s | 9,433 conn/s | 473 conn/s | 477 conn/s |
+| Concurrent transactions (50 connections) | 16,156 msg/s | 18,295 msg/s | 18,126 msg/s | 19,326 msg/s |
+| Large payloads (10 connections, 1MB bodies) | 1,505 MB/s | 1,386 MB/s | 1,682 MB/s | 578 MB/s |
+| Connection throughput¹ | 13,133 conn/s | 15,292 conn/s | 481 conn/s | 479 conn/s |
 
 Apple M2 Pro (12 cores), Node 26.8.1, Bun 1.3.13. Best of 5 timed runs
 after 2 warmups (best-of, not median).
@@ -156,10 +156,20 @@ per-connection floor caps them near 500 conn/s at concurrency 50, so
 this row measures that policy, not accept-loop throughput. effect-smtp
 greets immediately. The two throughput rows are the real comparison.
 
-**Reading the numbers.** Transactions are at parity with both
-references. On large payloads we beat bun-smtp by ~24% and `smtp-server`
-by ~2.6x — on the same runtime `smtp-server` uses. Two things got us
-there, both in `src/shared/internal/data-parser.ts`:
+**Reading the numbers.** Run-to-run spread is real, so here is the shape
+across repeated runs rather than one sample:
+
+- **Transactions** — everyone lands in the 14k–19k msg/s band. We are
+  within noise of both references.
+- **Large payloads** — effect-smtp holds 1.4–1.5 GB/s (1.4–1.5 on Node,
+  1.4–1.5 on Bun); bun-smtp ranged 1.15–1.68 GB/s across runs; 
+  `smtp-server` stayed at 549–578 MB/s. So: **~2.5x `smtp-server`**, and
+  **rough parity with bun-smtp** — sometimes ahead, sometimes behind,
+  never by much.
+- **Connections** — 27–37x the other two, which is the greeting policy.
+
+Two changes in `src/shared/internal/data-parser.ts` got the DATA path
+from 63 MB/s to ~1.5 GB/s:
 
 - the DATA path reads **chunks**, not lines, so a megabyte is a handful
   of Effect suspensions instead of ~13k; and
