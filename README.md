@@ -161,11 +161,10 @@ across repeated runs rather than one sample:
 
 - **Transactions** — everyone lands in the 14k–19k msg/s band. We are
   within noise of both references.
-- **Large payloads** — effect-smtp holds 1.4–1.5 GB/s (1.4–1.5 on Node,
-  1.4–1.5 on Bun); bun-smtp ranged 1.15–1.68 GB/s across runs; 
-  `smtp-server` stayed at 549–578 MB/s. So: **~2.5x `smtp-server`**, and
-  **rough parity with bun-smtp** — sometimes ahead, sometimes behind,
-  never by much.
+- **Large payloads** — effect-smtp holds 1.4–1.5 GB/s on both runtimes;
+  bun-smtp ranged 1.15–1.68 GB/s across runs; `smtp-server` stayed at
+  549–578 MB/s. So: **~2.5x `smtp-server`**, and **rough parity with
+  bun-smtp** — sometimes ahead, sometimes behind, never by much.
 - **Connections** — 27–37x the other two, which is the greeting policy.
 
 Two changes in `src/shared/internal/data-parser.ts` got the DATA path
