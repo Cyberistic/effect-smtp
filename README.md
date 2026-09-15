@@ -1,6 +1,6 @@
 # effect-smtp
 
-a very good Effect-native SMTP client and server. No external deps. Passes all tests and achieves ~throughput parity with other benchmarks.
+A _very good_ [Effect-native](https://effect.website/) SMTP client and server. No external deps. Passes SMTP conformance test suite and achieves ~higher throughput parity with other benchmarks.
 
 ## Quick start — client
 
