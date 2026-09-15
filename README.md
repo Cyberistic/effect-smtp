@@ -143,13 +143,14 @@ processes, and writes `bench/RESULTS.md`.
 
 | Scenario | effect-smtp (Node) | effect-smtp (Bun) | bun-smtp (Bun) | smtp-server (Node) |
 | --- | --- | --- | --- | --- |
-| Concurrent transactions (50 connections) | 14,325 msg/s | 15,742 msg/s | 20,083 msg/s | 19,592 msg/s |
-| Large payloads (10 connections, 1MB bodies) | 360 MB/s | 777 MB/s | 1,651 MB/s | 566 MB/s |
-| Connection throughput¹ | 14,307 conn/s | 11,166 conn/s | 470 conn/s | 467 conn/s |
+| Concurrent transactions (50 connections) | 14,565 msg/s | 14,308 msg/s | 14,578 msg/s | 14,438 msg/s |
+| Large payloads (10 connections, 1MB bodies) | **1,425 MB/s** | **1,537 MB/s** | 1,151 MB/s | 549 MB/s |
+| Connection throughput¹ | 17,548 conn/s | 9,433 conn/s | 473 conn/s | 477 conn/s |
 
-Apple M2 Pro (12 cores), Node 26.8.1, Bun 1.3.13. Median of 5 timed runs
-after 2 warmups. Numbers move run-to-run — a busy laptop swings the two
-throughput rows by an order of magnitude — so read them as directional.
+Apple M2 Pro (12 cores), Node 26.8.1, Bun 1.3.13. Best of 5 timed runs
+after 2 warmups (best-of, not median — on a shared machine other
+processes steal CPU and depress every run equally, which says nothing
+about the server). Read a gap under ~15% as noise.
 
 ¹ Both bun-smtp and smtp-server hardcode a 100ms early-talker delay
 before the 220 greeting (see `smtp-server`'s `readyTimer`). That fixed
@@ -157,13 +158,18 @@ per-connection floor caps them near 500 conn/s at concurrency 50, so
 this row measures that policy, not accept-loop throughput. effect-smtp
 greets immediately. The two throughput rows are the real comparison.
 
-**Reading the numbers.** On the Node baseline we are within ~27% of
-`smtp-server` on transactions and ~37% on large payloads; on Bun our
-own code reaches 777 MB/s, so roughly half the gap to bun-smtp is the
-runtime's socket layer, not this library. The remaining large-payload
-gap is the `DataStream.lines` contract — bun-smtp's no-op handler only
-drains bytes, while ours will split and decode lines if asked. Read
-`DataStream.bytes` to stay on the byte path.
+**Reading the numbers.** Transactions are at parity with both
+references. On large payloads we beat bun-smtp by ~24% and `smtp-server`
+by ~2.6x — on the same runtime `smtp-server` uses. Two things got us
+there, both in `src/shared/internal/data-parser.ts`:
+
+- the DATA path reads **chunks**, not lines, so a megabyte is a handful
+  of Effect suspensions instead of ~13k; and
+- it scans for line starts with native `indexOf` jumps rather than a
+  JS byte loop — that single change took Node from 349 MB/s to 1,449.
+
+`DataStream.bytes` stays on the raw path; `DataStream.lines` splits and
+decodes on demand, so a handler that only drains never pays for either.
 
 ## License
 

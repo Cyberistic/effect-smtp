@@ -6,7 +6,7 @@
  *   2. Concurrent transactions — N persistent connections doing MAIL/RCPT/DATA
  *   3. Large payload           — N connections streaming a ~1MB DATA body
  *
- * Every scenario returns a median over TIMED_RUNS after WARMUP_RUNS.
+ * Every scenario returns one measurement; bench/run.ts aggregates runs.
  */
 import { SmtpBenchClient } from "./client.ts";
 
@@ -205,10 +205,3 @@ export const SCENARIOS = [
   concurrentTransactionThroughput,
   largePayloadThroughput,
 ] as const;
-
-export const median = (nums: ReadonlyArray<number>): number => {
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 !== 0) return sorted[mid] ?? 0;
-  return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
-};

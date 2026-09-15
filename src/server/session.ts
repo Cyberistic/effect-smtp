@@ -1,8 +1,12 @@
-import { Effect, Ref } from "effect";
+import { Effect } from "effect";
 import { SmtpAuthError, SmtpError, SmtpRejectError } from "../shared/errors.ts";
 import { parseAddressCommand } from "../shared/internal/address.ts";
 import { decodeBase64 } from "../shared/internal/base64.ts";
-import { DataParser, decodeLine } from "../shared/internal/data-parser.ts";
+import {
+  DataParser,
+  joinBody,
+  splitLines,
+} from "../shared/internal/data-parser.ts";
 import type { SmtpAddress } from "../shared/envelope.ts";
 import type { SmtpConnection } from "../shared/transport/index.ts";
 import { hostname } from "node:os";
@@ -250,7 +254,9 @@ export const handleConnection = (
       upgradeTls,
       tlsAvailable,
     } = opts;
-    const stateRef = yield* Ref.make<SessionState>(initialState());
+    // Per-connection state, touched by exactly one fiber, so a local is
+    // safe and avoids a Ref round-trip on every command.
+    let state = initialState();
     let currentConn: SmtpConnection = conn;
     const lmtp = sessionOptions.lmtp;
 
@@ -273,7 +279,6 @@ export const handleConnection = (
 
     // onConnect runs before the greeting and can refuse the connection.
     if (sessionOptions.onConnect) {
-      const state = yield* Ref.get(stateRef);
       const refusal = yield* Effect.matchEffect(
         sessionOptions.onConnect(session(state)),
         {
@@ -302,7 +307,6 @@ export const handleConnection = (
       if (line === null) break;
       const verb = line.split(" ")[0]?.toUpperCase() ?? "";
       const arg = line.slice(verb.length).trim();
-      const state = yield* Ref.get(stateRef);
       const greeted = state.openingCommand !== "";
       const authed = state.user !== undefined;
 
@@ -314,11 +318,7 @@ export const handleConnection = (
         } else if (arg === "") {
           yield* sendReply(currentConn, 501, `Syntax: ${verb} hostname`);
         } else {
-          yield* Ref.update(stateRef, (s) => ({
-            ...s,
-            openingCommand: verb,
-            clientHostname: arg,
-          }));
+          state = { ...state, openingCommand: verb, clientHostname: arg };
           if (verb === "HELO") {
             yield* sendReply(currentConn, 250, sessionOptions.name);
           } else {
@@ -343,7 +343,7 @@ export const handleConnection = (
           });
           if (upgraded) {
             currentConn = upgraded;
-            yield* Ref.update(stateRef, (s) => ({ ...s, secure: true }));
+            state = { ...state, secure: true };
           }
         }
       } else if (verb === "AUTH") {
@@ -366,13 +366,13 @@ export const handleConnection = (
                   return (yield* readLine()) ?? "";
                 })
               : token;
-          yield* runAuthPlain(
+          const user = yield* runAuthPlain(
             currentConn,
             sessionOptions,
             initial,
-            stateRef,
             session(state),
           );
+          if (user !== undefined) state = { ...state, user };
         } else if (method === "LOGIN") {
           yield* sendReply(currentConn, 334, "VXNlcm5hbWU6");
           const userLine = (yield* readLine()) ?? "";
@@ -380,7 +380,7 @@ export const handleConnection = (
           const passLine = (yield* readLine()) ?? "";
           const decode = (b64: string): string =>
             new TextDecoder().decode(decodeBase64(b64));
-          yield* runAuthCredential(
+          const user = yield* runAuthCredential(
             currentConn,
             sessionOptions,
             {
@@ -388,9 +388,9 @@ export const handleConnection = (
               identity: decode(userLine),
               password: decode(passLine),
             },
-            stateRef,
             session(state),
           );
+          if (user !== undefined) state = { ...state, user };
         } else {
           yield* sendReply(
             currentConn,
@@ -429,12 +429,12 @@ export const handleConnection = (
           } else {
             // A MAIL FROM opens a transaction, so the counter advances
             // before onData sees it (1 for the first message).
-            yield* Ref.update(stateRef, (s) => ({
-              ...s,
+            state = {
+              ...state,
               mailFrom: from,
               rcptTo: [],
-              transaction: s.transaction + 1,
-            }));
+              transaction: state.transaction + 1,
+            };
             yield* sendReply(currentConn, 250, "2.1.0 Sender OK");
           }
         }
@@ -459,17 +459,11 @@ export const handleConnection = (
           if (refusal) {
             yield* sendReply(currentConn, refusal.code, refusal.message);
           } else {
-            yield* Ref.update(stateRef, (s) => ({
-              ...s,
-              rcptTo: [...s.rcptTo, to],
-            }));
+            state = { ...state, rcptTo: [...state.rcptTo, to] };
             yield* sendReply(currentConn, 250, "2.1.5 Recipient OK");
           }
         } else {
-          yield* Ref.update(stateRef, (s) => ({
-            ...s,
-            rcptTo: [...s.rcptTo, to],
-          }));
+          state = { ...state, rcptTo: [...state.rcptTo, to] };
           yield* sendReply(currentConn, 250, "2.1.5 Recipient OK");
         }
       } else if (verb === "DATA") {
@@ -497,8 +491,10 @@ export const handleConnection = (
             );
           } else {
             const dataStream: DataStream = {
-              lines: Effect.sync(() => parsed.lines.map(decodeLine)),
-              bytes: Effect.sync(() => joinLines(parsed.lines)),
+              // Both views are lazy: a handler that drains pays for
+              // neither the concatenation nor the decode.
+              bytes: Effect.sync(() => joinBody(parsed.body)),
+              lines: Effect.sync(() => splitLines(joinBody(parsed.body))),
               byteLength: Effect.succeed(byteLength),
               sizeExceeded: Effect.succeed(false),
             };
@@ -513,20 +509,12 @@ export const handleConnection = (
               yield* sendReply(currentConn, refusal.code, refusal.message);
             } else {
               yield* sendReply(currentConn, 250, "2.6.0 Message accepted");
-              yield* Ref.update(stateRef, (s) => ({
-                ...s,
-                mailFrom: undefined,
-                rcptTo: [],
-              }));
+              state = { ...state, mailFrom: undefined, rcptTo: [] };
             }
           }
         }
       } else if (verb === "RSET") {
-        yield* Ref.update(stateRef, (s) => ({
-          ...s,
-          mailFrom: undefined,
-          rcptTo: [],
-        }));
+        state = { ...state, mailFrom: undefined, rcptTo: [] };
         yield* sendReply(currentConn, 250, "OK");
       } else if (verb === "NOOP") {
         yield* sendReply(currentConn, 250, "OK");
@@ -546,43 +534,27 @@ export const handleConnection = (
     }
 
     if (sessionOptions.onClose) {
-      yield* sessionOptions.onClose(session(yield* Ref.get(stateRef)));
+      yield* sessionOptions.onClose(session(state));
     }
 
     yield* currentConn.close;
   }).pipe(Effect.orElseSucceed(() => undefined));
 
-const runAuthPlain = (
-  conn: SmtpConnection,
-  options: ServerSessionOptions,
-  token: string,
-  stateRef: Ref.Ref<SessionState>,
-  session: ServerSession,
-): Effect.Effect<void, never> => {
-  const decoded = new TextDecoder().decode(decodeBase64(token));
-  const parts = decoded.split("\0");
-  const identity = parts[1] || parts[0] || "";
-  const password = parts[2] || "";
-  return runAuthCredential(
-    conn,
-    options,
-    { method: "PLAIN", identity, password },
-    stateRef,
-    session,
-  );
-};
-
+/**
+ * Run an AUTH exchange. Sends the 235/535 reply and returns the user on
+ * success, or `undefined` on failure — the caller folds it into session
+ * state.
+ */
 const runAuthCredential = (
   conn: SmtpConnection,
   options: ServerSessionOptions,
   auth: AuthObject,
-  stateRef: Ref.Ref<SessionState>,
   session: ServerSession,
-): Effect.Effect<void, never> =>
+): Effect.Effect<unknown, never> =>
   Effect.gen(function* () {
     if (!options.onAuth) {
       yield* sendReply(conn, 535, "5.7.8 Authentication credentials invalid");
-      return;
+      return undefined;
     }
     const result = yield* Effect.matchEffect(options.onAuth(auth, session), {
       onFailure: (e) => Effect.succeed({ ok: false as const, error: e }),
@@ -590,27 +562,47 @@ const runAuthCredential = (
     });
     if (!result.ok || !result.value?.user) {
       yield* sendReply(conn, 535, "5.7.8 Authentication credentials invalid");
-      return;
+      return undefined;
     }
-    yield* Ref.update(stateRef, (s) => ({ ...s, user: result.value?.user }));
     yield* sendReply(conn, 235, "2.7.0 Authentication successful");
+    return result.value.user;
   }).pipe(Effect.orElseSucceed(() => undefined));
+
+const runAuthPlain = (
+  conn: SmtpConnection,
+  options: ServerSessionOptions,
+  token: string,
+  session: ServerSession,
+): Effect.Effect<unknown, never> => {
+  const parts = new TextDecoder().decode(decodeBase64(token)).split("\0");
+  return runAuthCredential(
+    conn,
+    options,
+    {
+      method: "PLAIN",
+      identity: parts[1] || parts[0] || "",
+      password: parts[2] || "",
+    },
+    session,
+  );
+};
 
 /**
  * Read the DATA body. Consumes raw chunks via
- * `SmtpConnection.readChunk` — the `DataParser` is chunk-native, so a
- * 1 MB body is a handful of reads rather than ~13k line reads.
+ * `SmtpConnection.readChunk` and keeps the parser's raw body segments —
+ * a 1 MB body with no leading dots is one segment per socket chunk, not
+ * ~13k line slices.
  */
 const readDataMode = (
   conn: SmtpConnection,
   maxBytes: number,
 ): Effect.Effect<
-  { readonly lines: ReadonlyArray<Uint8Array>; readonly byteLength: number },
+  { readonly body: ReadonlyArray<Uint8Array>; readonly byteLength: number },
   SmtpError
 > =>
   Effect.gen(function* () {
     const parser = new DataParser(maxBytes);
-    const collected: Uint8Array[] = [];
+    const segments: Uint8Array[] = [];
     while (!parser.finished) {
       const chunk = yield* conn.readChunk.pipe(
         Effect.mapError(
@@ -622,32 +614,11 @@ const readDataMode = (
             }),
         ),
       );
-      const { lines } = parser.feed(chunk);
-      for (const line of lines) {
-        collected.push(line);
-      }
+      const { body } = parser.feed(chunk);
+      for (const segment of body) segments.push(segment);
     }
-    return { lines: collected, byteLength: parser.bytes };
+    return { body: segments, byteLength: parser.bytes };
   });
-
-/** Join unstuffed line slices with CRLF — the decoded body's byte form. */
-const joinLines = (lines: ReadonlyArray<Uint8Array>): Uint8Array => {
-  let size = 0;
-  for (const line of lines) size += line.length + 2;
-  const out = new Uint8Array(Math.max(0, size - 2));
-  let offset = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    if (i > 0) {
-      out[offset++] = 0x0d;
-      out[offset++] = 0x0a;
-    }
-    out.set(line, offset);
-    offset += line.length;
-  }
-  return out;
-};
 
 // Reserved for future server-side LMTP / CRAM-MD5.
 void localhost;

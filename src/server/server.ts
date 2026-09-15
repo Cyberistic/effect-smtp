@@ -161,10 +161,7 @@ export const listenSmtp = (
         tlsSocket.once("secure", () => {
           resume(
             Effect.succeed(
-              buildConnectionFromSocket(
-                tlsSocket,
-                Effect.runSync(makeSocketState),
-              ),
+              buildConnectionFromSocket(tlsSocket, makeSocketState()),
             ),
           );
         });
@@ -173,10 +170,7 @@ export const listenSmtp = (
     server.on("connection", (socket: net.Socket) => {
       connectionCounter += 1;
       const id = `c${connectionCounter}`;
-      const conn = buildConnectionFromSocket(
-        socket,
-        Effect.runSync(makeSocketState),
-      );
+      const conn = buildConnectionFromSocket(socket, makeSocketState());
 
       const upgradeTls = (
         current: SmtpConnection,

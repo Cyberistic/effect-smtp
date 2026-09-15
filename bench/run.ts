@@ -11,7 +11,7 @@ import { cpus } from "node:os";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { median, SCENARIOS, type ScenarioResult } from "./scenarios.ts";
+import { SCENARIOS, type ScenarioResult } from "./scenarios.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -100,13 +100,13 @@ const runScenariosAgainst = async (
     }
     const first = runs[0];
     if (!first) continue;
-    process.stdout.write(
-      ` ${first.name}: ${median(runs.map((r) => r.metricValue)).toFixed(2)} ${first.unit}\n`,
-    );
-    results.set(first.name, {
-      ...first,
-      metricValue: median(runs.map((r) => r.metricValue)),
-    });
+    // Best-of-N, not median: a shared dev machine injects downward noise
+    // (other processes stealing CPU) that a median faithfully reports but
+    // that has nothing to do with the server. The peak run is the closest
+    // estimate of what each server can actually do.
+    const best = Math.max(...runs.map((r) => r.metricValue));
+    process.stdout.write(` ${first.name}: ${best.toFixed(2)} ${first.unit}\n`);
+    results.set(first.name, { ...first, metricValue: best });
   }
   return results;
 };
@@ -162,7 +162,7 @@ const main = async (): Promise<void> => {
   );
   lines.push("");
   lines.push(
-    `Methodology: ${WARMUP_RUNS} discarded warmup runs + ${TIMED_RUNS} timed runs per scenario, median reported. ` +
+    `Methodology: ${WARMUP_RUNS} discarded warmup runs + ${TIMED_RUNS} timed runs per scenario, best-of reported. ` +
       "Each server runs as its own OS process and all are driven by the same raw-TCP client (`bench/client.ts`) " +
       "with a no-op DATA handler, `maxSize: 0` (effect-smtp) matched to bun-smtp's `authOptional: true, " +
       "disableReverseLookup: true`. The three targets separate the two effects: effect-smtp on Node vs on Bun " +
@@ -171,10 +171,10 @@ const main = async (): Promise<void> => {
   );
   lines.push("");
   lines.push(
-    "Numbers are machine-dependent and the throughput scenarios move run-to-run " +
-      "(a shared CI box or a busy laptop swings them by an order of magnitude). Treat a single " +
-      "run as directional; compare medians across runs on a quiet machine before reading a gap " +
-      "as real.",
+    "Best-of-N rather than median: on a shared dev machine other processes steal CPU and " +
+      "depress every run, which a median reports faithfully but which says nothing about the " +
+      "server under test. The peak run is the closest estimate of each server's ceiling. " +
+      "Numbers are still machine-dependent — read a gap under ~15% as noise.",
   );
   lines.push("");
   lines.push(

@@ -82,9 +82,7 @@ const connectPlain = (
     });
     socket.once("connect", () => {
       cleanup();
-      resume(
-        Effect.succeed(attachSocket(socket, Effect.runSync(makeSocketState))),
-      );
+      resume(Effect.succeed(attachSocket(socket, makeSocketState())));
     });
   });
 
@@ -111,11 +109,7 @@ const upgradeTlsImpl = (
     });
     tlsSocket.once("secureConnect", () => {
       cleanup();
-      resume(
-        Effect.succeed(
-          attachSocket(tlsSocket, Effect.runSync(makeSocketState)),
-        ),
-      );
+      resume(Effect.succeed(attachSocket(tlsSocket, makeSocketState())));
     });
   });
 

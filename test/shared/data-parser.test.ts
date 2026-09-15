@@ -1,28 +1,39 @@
 import { describe, expect, it } from "vitest";
 import {
-  decodeLine,
   DataParser,
+  joinBody,
+  splitLines,
 } from "../../src/shared/internal/data-parser.ts";
 
 const b = (s: string): Uint8Array => new TextEncoder().encode(s);
+const dec = (u: Uint8Array): string => new TextDecoder().decode(u);
 
 interface Collected {
+  /** The unstuffed body, as bytes. */
+  readonly body: string;
+  /** The unstuffed body, split into decoded lines. */
   readonly lines: ReadonlyArray<string>;
   readonly byteLength: number;
   readonly remainder: string | null;
 }
 
-/** Feed chunks through a fresh parser and collect decoded lines + remainder. */
+/** Feed chunks through a fresh parser and collect body + remainder. */
 const collect = (chunks: ReadonlyArray<string>, maxBytes = 0): Collected => {
   const parser = new DataParser(maxBytes);
-  const lines: string[] = [];
+  const segments: Uint8Array[] = [];
   let remainder: string | null = null;
   for (const chunk of chunks) {
     const feed = parser.feed(b(chunk));
-    for (const line of feed.lines) lines.push(decodeLine(line));
-    if (feed.remainder) remainder = decodeLine(feed.remainder);
+    for (const segment of feed.body) segments.push(segment);
+    if (feed.remainder) remainder = dec(feed.remainder);
   }
-  return { lines, byteLength: parser.bytes, remainder };
+  const body = joinBody(segments);
+  return {
+    body: dec(body),
+    lines: splitLines(body),
+    byteLength: parser.bytes,
+    remainder,
+  };
 };
 
 describe("DataParser — basics", () => {
@@ -34,6 +45,7 @@ describe("DataParser — basics", () => {
 
   it("empty message (terminator immediately)", () => {
     const r = collect([".\r\n"]);
+    expect(r.body).toBe("");
     expect(r.lines).toEqual([]);
     expect(r.byteLength).toBe(0);
   });
@@ -53,11 +65,19 @@ describe("DataParser — basics", () => {
     const r = collect(["Header\nbody\n.\n"]);
     expect(r.lines).toEqual(["Header", "body"]);
   });
+
+  it("emits one body segment for a dot-free chunk (no per-line slicing)", () => {
+    const parser = new DataParser();
+    const big = `${"x".repeat(76)}\r\n`.repeat(100) + ".\r\n";
+    const feed = parser.feed(b(big));
+    expect(feed.body.length).toBe(1);
+  });
 });
 
 describe("DataParser — dot-unstuffing", () => {
   it("dot-stuffed dot in the middle of a message", () => {
     const r = collect(["Line 1\r\n..dotline\r\n.\r\n"]);
+    expect(r.body).toBe("Line 1\r\n.dotline\r\n");
     expect(r.lines).toEqual(["Line 1", ".dotline"]);
   });
 
@@ -68,7 +88,13 @@ describe("DataParser — dot-unstuffing", () => {
 
   it("multiple dot-stuffed lines", () => {
     const r = collect(["..first\r\n..second\r\n.\r\n"]);
+    expect(r.body).toBe(".first\r\n.second\r\n");
     expect(r.lines).toEqual([".first", ".second"]);
+  });
+
+  it("a dot-stuffed line at the very start of the body", () => {
+    const r = collect(["..leading\r\n.\r\n"]);
+    expect(r.body).toBe(".leading\r\n");
   });
 
   it("a leading dot not followed by a dot is passed through", () => {
@@ -88,6 +114,17 @@ describe("DataParser — size accounting", () => {
     parser.feed(b("1234567\r\n.\r\n"));
     expect(parser.bytes).toBeGreaterThan(5);
     expect(parser.finished).toBe(true);
+  });
+
+  it("does not double-count bytes held over a chunk boundary", () => {
+    const parser = new DataParser();
+    // The final "." is incomplete, so it is held over — its byte must not
+    // be counted until the next chunk classifies it.
+    parser.feed(b("hi\r\n."));
+    const afterFirst = parser.bytes;
+    parser.feed(b("\r\n"));
+    expect(afterFirst).toBe(4); // "hi\r\n"
+    expect(parser.bytes).toBe(4);
   });
 });
 
